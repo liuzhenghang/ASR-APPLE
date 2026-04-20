@@ -1,0 +1,5 @@
+mlx-audio
+fastapi
+uvicorn[standard]
+python-multipart
+httpx
