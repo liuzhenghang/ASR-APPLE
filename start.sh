@@ -68,8 +68,8 @@ fi
 
 if [ "$need_install" = "1" ]; then
   echo "[start.sh] 安装/更新依赖..."
-  python -m pip install --upgrade pip
-  python -m pip install -r "$REQ_FILE"
+  python -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple
+  python -m pip install -r "$REQ_FILE" -i https://pypi.tuna.tsinghua.edu.cn/simple
   touch "$STAMP_FILE"
 else
   echo "[start.sh] 依赖已是最新，跳过安装 (删除 $STAMP_FILE 可强制重装)"
