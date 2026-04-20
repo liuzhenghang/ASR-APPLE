@@ -40,6 +40,16 @@ fi
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 
+# ---------- 处理参数 ----------
+FORCE_INSTALL=0
+EXTRA_ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    install) FORCE_INSTALL=1 ;;
+    *) EXTRA_ARGS+=("$arg") ;;
+  esac
+done
+
 echo "[start.sh] python=$(python --version 2>&1) at $(which python)"
 
 # ---------- 安装依赖 ----------
@@ -47,7 +57,10 @@ REQ_FILE="requirements.txt"
 STAMP_FILE="$VENV_DIR/.requirements.stamp"
 
 need_install=0
-if [ ! -f "$STAMP_FILE" ]; then
+if [ "$FORCE_INSTALL" = "1" ]; then
+  echo "[start.sh] 强制重新安装依赖..."
+  need_install=1
+elif [ ! -f "$STAMP_FILE" ]; then
   need_install=1
 elif [ "$REQ_FILE" -nt "$STAMP_FILE" ]; then
   need_install=1
@@ -78,4 +91,4 @@ echo "[start.sh] MAX_CONCURR. : $ASR_MAX_CONCURRENCY"
 echo "[start.sh] ========================================"
 
 # ---------- 启动 ----------
-exec python app.py
+exec python app.py "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
