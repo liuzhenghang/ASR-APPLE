@@ -87,7 +87,7 @@ app = FastAPI(title="MLX Qwen3-ASR API", lifespan=lifespan)
 class AsrUrlReq(BaseModel):
     url: HttpUrl
     language: Optional[str] = None
-    only_text: Optional[bool] = False
+    more_info: Optional[bool] = False
 
 
 async def _acquire_slot():
@@ -459,7 +459,7 @@ async def health():
 async def asr_file(
     audio_file: UploadFile = File(...),
     language: Optional[str] = Form(None),
-    only_text: Optional[bool] = Form(False),
+    more_info: Optional[bool] = Form(False),
 ):
     await _acquire_slot()
     suffix = _suffix_from_name(audio_file.filename)
@@ -479,9 +479,9 @@ async def asr_file(
         if total == 0:
             raise HTTPException(status_code=400, detail="empty audio_file")
         result = await _transcribe(tmp_path, language)
-        if only_text:
-            return Response(content=result["text"], media_type="text/plain")
-        return result
+        if more_info:
+            return result
+        return Response(content=result["text"], media_type="text/plain")
     finally:
         try:
             if not tmp.closed:
@@ -532,9 +532,9 @@ async def asr_url(req: AsrUrlReq):
         if total == 0:
             raise HTTPException(status_code=400, detail="empty remote file")
         result = await _transcribe(tmp_path, req.language)
-        if req.only_text:
-            return Response(content=result["text"], media_type="text/plain")
-        return result
+        if req.more_info:
+            return result
+        return Response(content=result["text"], media_type="text/plain")
     finally:
         if tmp_path:
             try:
