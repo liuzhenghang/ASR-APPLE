@@ -120,12 +120,10 @@ curl -X POST http://localhost:8000/asr_url \
 }
 ```
 
-当 `only_text=true` 时，响应仅包含 `text` 字段：
+当 `only_text=true` 时，响应为纯文本，`Content-Type: text/plain`：
 
-```json
-{
-  "text": "完整识别文本"
-}
+```
+完整识别文本
 ```
 
 | 字段 | 类型 | 说明 |

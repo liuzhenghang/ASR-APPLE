@@ -15,6 +15,7 @@ os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(DEFAULT_MODELS_DIR / "hub"))
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel, HttpUrl
 
 from mlx_audio.stt import load
@@ -139,7 +140,7 @@ def _result_to_dict(result: Any) -> dict[str, Any]:
     }
 
 
-async def _transcribe(path: str, language: Optional[str], only_text: bool = False) -> dict[str, Any]:
+async def _transcribe(path: str, language: Optional[str]) -> dict[str, Any]:
     model = _state.get("model")
     if model is None:
         raise HTTPException(status_code=503, detail="model not loaded")
@@ -153,10 +154,7 @@ async def _transcribe(path: str, language: Optional[str], only_text: bool = Fals
         except Exception as e:
             logger.exception("transcribe failed")
             raise HTTPException(status_code=500, detail=f"transcribe failed: {e}") from e
-    data = _result_to_dict(result)
-    if only_text:
-        return {"text": data["text"]}
-    return data
+    return _result_to_dict(result)
 
 
 @app.get("/health")
@@ -194,7 +192,10 @@ async def asr_file(
         tmp.close()
         if total == 0:
             raise HTTPException(status_code=400, detail="empty audio_file")
-        return await _transcribe(tmp_path, language, only_text)
+        result = await _transcribe(tmp_path, language)
+        if only_text:
+            return Response(content=result["text"], media_type="text/plain")
+        return result
     finally:
         try:
             if not tmp.closed:
@@ -244,7 +245,10 @@ async def asr_url(req: AsrUrlReq):
 
         if total == 0:
             raise HTTPException(status_code=400, detail="empty remote file")
-        return await _transcribe(tmp_path, req.language, req.only_text)
+        result = await _transcribe(tmp_path, req.language)
+        if req.only_text:
+            return Response(content=result["text"], media_type="text/plain")
+        return result
     finally:
         if tmp_path:
             try:
