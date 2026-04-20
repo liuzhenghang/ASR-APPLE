@@ -141,8 +141,10 @@ def _suffix_from_url(url: str, content_type: Optional[str]) -> str:
 
 def _result_to_dict(result: Any) -> dict[str, Any]:
     text = getattr(result, "text", None)
+    if isinstance(text, (list, tuple)):
+        text = text[0] if text else None
     segments = getattr(result, "segments", None) or []
-    language = getattr(result, "language", None)
+    language = _coerce_lang(getattr(result, "language", None))
     total_time = getattr(result, "total_time", None)
 
     norm_segments = []
@@ -172,22 +174,37 @@ def _result_to_dict(result: Any) -> dict[str, Any]:
     }
 
 
-def _normalize_language(lang: Optional[str]) -> Optional[str]:
-    if not lang:
+def _coerce_lang(lang: Any) -> Optional[str]:
+    """ASR/aligner 返回的 language 可能是 str / list / tuple，统一成单个 str。"""
+    if lang is None:
         return None
-    return lang.strip().capitalize()
+    if isinstance(lang, (list, tuple)):
+        lang = lang[0] if lang else None
+    if lang is None:
+        return None
+    if not isinstance(lang, str):
+        lang = str(lang)
+    lang = lang.strip()
+    return lang or None
 
 
-def _is_cjk_language(lang: Optional[str]) -> bool:
-    if not lang:
+def _normalize_language(lang: Any) -> Optional[str]:
+    s = _coerce_lang(lang)
+    return s.capitalize() if s else None
+
+
+def _is_cjk_language(lang: Any) -> bool:
+    s = _coerce_lang(lang)
+    if not s:
         return False
-    return lang.strip().lower() in _CJK_LANGS
+    return s.lower() in _CJK_LANGS
 
 
-def _aligner_supports(language: Optional[str]) -> bool:
-    if not language:
+def _aligner_supports(language: Any) -> bool:
+    s = _coerce_lang(language)
+    if not s:
         return True
-    return language.strip().lower() in _ALIGNER_SUPPORTED_LANGS
+    return s.lower() in _ALIGNER_SUPPORTED_LANGS
 
 
 def _split_text_by_punct(text: str, language: Optional[str]) -> list[str]:
