@@ -35,6 +35,17 @@ MAX_CONCURRENCY = int(os.environ.get("ASR_MAX_CONCURRENCY", "1"))
 
 _CJK_LANGS = {"chinese", "cantonese", "japanese", "korean"}
 
+# ForcedAligner 已知支持语言（不在列表里就不调 aligner，直接走标点切分 fallback）
+_ALIGNER_SUPPORTED_LANGS = {
+    "cantonese", "chinese", "english", "french", "german", "italian",
+    "japanese", "korean", "portuguese", "russian", "spanish",
+}
+
+# 多语言句末标点（中/英/日/阿拉伯/西语等）
+_SENT_END_PUNCT = set("。！？；.!?;…؟؛।")
+# 次级分隔（句子太长时再按这些切）
+_SUB_SEP_PUNCT = set("，、,،")
+
 logger = logging.getLogger("asr")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -173,6 +184,79 @@ def _is_cjk_language(lang: Optional[str]) -> bool:
     return lang.strip().lower() in _CJK_LANGS
 
 
+def _aligner_supports(language: Optional[str]) -> bool:
+    if not language:
+        return True
+    return language.strip().lower() in _ALIGNER_SUPPORTED_LANGS
+
+
+def _split_text_by_punct(text: str, language: Optional[str]) -> list[str]:
+    """无时间戳的兜底切分：先按句末标点切，长句再按逗号切，还长就按长度硬切。"""
+    text = (text or "").strip()
+    if not text:
+        return []
+
+    def flush_chunk(buf: list[str], out: list[str]):
+        s = "".join(buf).strip()
+        if s:
+            out.append(s)
+
+    primary: list[str] = []
+    buf: list[str] = []
+    for ch in text:
+        buf.append(ch)
+        if ch in _SENT_END_PUNCT:
+            flush_chunk(buf, primary)
+            buf = []
+    flush_chunk(buf, primary)
+
+    cjk = _is_cjk_language(language)
+    joiner = "" if cjk else " "
+
+    def too_long(s: str) -> bool:
+        return len(s) > SEG_MAX_CHARS
+
+    def hard_chunks(s: str) -> list[str]:
+        if cjk:
+            return [s[i : i + SEG_MAX_CHARS] for i in range(0, len(s), SEG_MAX_CHARS)]
+        words = s.split()
+        chunks: list[str] = []
+        cur: list[str] = []
+        cur_len = 0
+        for w in words:
+            add = len(w) + (1 if cur else 0)
+            if cur and cur_len + add > SEG_MAX_CHARS:
+                chunks.append(joiner.join(cur))
+                cur = [w]
+                cur_len = len(w)
+            else:
+                cur.append(w)
+                cur_len += add
+        if cur:
+            chunks.append(joiner.join(cur))
+        return chunks
+
+    result: list[str] = []
+    for sent in primary:
+        if not too_long(sent):
+            result.append(sent)
+            continue
+        sub_buf: list[str] = []
+        subs: list[str] = []
+        for ch in sent:
+            sub_buf.append(ch)
+            if ch in _SUB_SEP_PUNCT:
+                flush_chunk(sub_buf, subs)
+                sub_buf = []
+        flush_chunk(sub_buf, subs)
+        for s in subs:
+            if too_long(s):
+                result.extend(hard_chunks(s))
+            else:
+                result.append(s)
+    return [s for s in (x.strip() for x in result) if s]
+
+
 def _align_to_segments(
     audio_path: str,
     text: str,
@@ -180,16 +264,30 @@ def _align_to_segments(
 ) -> list[dict[str, Any]]:
     """用 ForcedAligner 拿到 word/char 级时间戳，按停顿切段。失败返回 []。"""
     aligner = _state.get("aligner")
-    if aligner is None or not text or not text.strip():
+    if aligner is None:
+        logger.info("align: skip (aligner not loaded)")
+        return []
+    if not text or not text.strip():
+        logger.info("align: skip (empty text)")
+        return []
+    if not _aligner_supports(language):
+        logger.info(
+            "align: skip (language %r not in aligner-supported %s)",
+            language,
+            sorted(_ALIGNER_SUPPORTED_LANGS),
+        )
         return []
     try:
         norm_lang = _normalize_language(language)
         kwargs: dict[str, Any] = {"audio": audio_path, "text": text}
         if norm_lang:
             kwargs["language"] = norm_lang
+        logger.info(
+            "align: run aligner (lang=%s, text_len=%d)", norm_lang, len(text)
+        )
         items = aligner.generate(**kwargs)
     except Exception:
-        logger.exception("forced-align failed, fallback to raw text")
+        logger.exception("align: forced-align failed")
         return []
 
     norm: list[dict[str, Any]] = []
@@ -201,6 +299,7 @@ def _align_to_segments(
             continue
         norm.append({"text": str(t), "start": float(s), "end": float(e)})
 
+    logger.info("align: got %d aligned items", len(norm))
     if not norm:
         return []
 
@@ -259,6 +358,9 @@ async def _transcribe(path: str, language: Optional[str]) -> dict[str, Any]:
         kwargs["language"] = norm_lang
     async with sem:
         try:
+            logger.info(
+                "asr: start (path=%s, lang=%s)", os.path.basename(path), norm_lang
+            )
             result = await asyncio.to_thread(model.generate, path, **kwargs)
         except Exception as e:
             logger.exception("transcribe failed")
@@ -267,6 +369,16 @@ async def _transcribe(path: str, language: Optional[str]) -> dict[str, Any]:
         out = _result_to_dict(result)
         detected_lang = out.get("language") or norm_lang
         raw_text = (out.get("text") or "").strip()
+        raw_segments = out.get("segments") or []
+        logger.info(
+            "asr: done (lang=%s, text_len=%d, raw_segments=%d, preview=%r)",
+            detected_lang,
+            len(raw_text),
+            len(raw_segments),
+            raw_text[:80],
+        )
+
+        segs: list[dict[str, Any]] = []
 
         if _state.get("aligner") is not None and raw_text:
             try:
@@ -276,9 +388,37 @@ async def _transcribe(path: str, language: Optional[str]) -> dict[str, Any]:
             except Exception:
                 logger.exception("align task failed")
                 segs = []
-            if segs:
-                out["segments"] = segs
-                out["text"] = "\n".join(s["text"] for s in segs)
+
+        if not segs and len(raw_segments) > 1:
+            logger.info("seg: use native asr segments (%d)", len(raw_segments))
+            segs = [
+                {
+                    "text": (s.get("text") or "").strip(),
+                    "start": s.get("start"),
+                    "end": s.get("end"),
+                }
+                for s in raw_segments
+                if (s.get("text") or "").strip()
+            ]
+
+        if not segs and raw_text:
+            punct_segs = _split_text_by_punct(raw_text, detected_lang)
+            if len(punct_segs) > 1:
+                logger.info(
+                    "seg: fallback to punctuation split (%d segments)",
+                    len(punct_segs),
+                )
+                segs = [{"text": s, "start": None, "end": None} for s in punct_segs]
+            else:
+                logger.info(
+                    "seg: punctuation split produced %d segments, keep raw text",
+                    len(punct_segs),
+                )
+
+        if segs:
+            out["segments"] = segs
+            out["text"] = "\n".join(s["text"] for s in segs)
+            logger.info("seg: final %d segments", len(segs))
     return out
 
 

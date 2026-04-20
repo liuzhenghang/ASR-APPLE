@@ -7,6 +7,11 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 ASR_HOST="${ASR_HOST:-0.0.0.0}"
 ASR_PORT="${ASR_PORT:-8000}"
 ASR_MODEL_ID="${ASR_MODEL_ID:-mlx-community/Qwen3-ASR-1.7B-8bit}"
+ASR_ALIGNER_ID="${ASR_ALIGNER_ID:-mlx-community/Qwen3-ForcedAligner-0.6B-8bit}"
+ASR_ENABLE_ALIGN="${ASR_ENABLE_ALIGN:-1}"
+ASR_SEG_GAP_SEC="${ASR_SEG_GAP_SEC:-0.8}"
+ASR_SEG_MAX_DURATION="${ASR_SEG_MAX_DURATION:-30}"
+ASR_SEG_MAX_CHARS="${ASR_SEG_MAX_CHARS:-120}"
 ASR_MAX_QUEUE="${ASR_MAX_QUEUE:-5}"
 ASR_MAX_CONCURRENCY="${ASR_MAX_CONCURRENCY:-1}"
 # 可选: 走镜像加速 HF 下载
@@ -58,10 +63,14 @@ else
 fi
 
 # ---------- 导出运行参数 ----------
-export ASR_HOST ASR_PORT ASR_MODEL_ID ASR_MAX_QUEUE ASR_MAX_CONCURRENCY
+export ASR_HOST ASR_PORT ASR_MODEL_ID ASR_ALIGNER_ID ASR_ENABLE_ALIGN \
+  ASR_SEG_GAP_SEC ASR_SEG_MAX_DURATION ASR_SEG_MAX_CHARS \
+  ASR_MAX_QUEUE ASR_MAX_CONCURRENCY
 
 echo "[start.sh] ========================================"
 echo "[start.sh] MODEL        : $ASR_MODEL_ID"
+echo "[start.sh] ALIGNER      : $ASR_ALIGNER_ID (enable=$ASR_ENABLE_ALIGN)"
+echo "[start.sh] SEG          : gap=${ASR_SEG_GAP_SEC}s max_dur=${ASR_SEG_MAX_DURATION}s max_chars=${ASR_SEG_MAX_CHARS}"
 echo "[start.sh] MODELS_DIR   : $MODELS_DIR"
 echo "[start.sh] HOST:PORT    : $ASR_HOST:$ASR_PORT"
 echo "[start.sh] MAX_QUEUE    : $ASR_MAX_QUEUE"
