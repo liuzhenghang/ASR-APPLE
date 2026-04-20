@@ -51,6 +51,7 @@
 |------|------|------|------|
 | `audio_file` | file | 是 | 音频文件（支持 wav、mp3、m4a、flac 等格式） |
 | `language` | string | 否 | 语言代码，如 `zh`、`en` |
+| `only_text` | bool | 否 | 是否只返回 text 字段，默认 `false` |
 
 **请求示例**（curl）：
 
@@ -76,6 +77,7 @@ curl -X POST http://localhost:8000/asr_file \
 |------|------|------|------|
 | `url` | string | 是 | 音频文件的 HTTP/HTTPS URL |
 | `language` | string | 否 | 语言代码，如 `zh`、`en` |
+| `only_text` | bool | 否 | 是否只返回 text 字段，默认 `false` |
 
 **请求示例**：
 
@@ -115,6 +117,14 @@ curl -X POST http://localhost:8000/asr_url \
   ],
   "language": "zh",
   "total_time": 5.0
+}
+```
+
+当 `only_text=true` 时，响应仅包含 `text` 字段：
+
+```json
+{
+  "text": "完整识别文本"
 }
 ```
 

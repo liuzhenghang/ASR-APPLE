@@ -54,6 +54,7 @@ app = FastAPI(title="MLX Qwen3-ASR API", lifespan=lifespan)
 class AsrUrlReq(BaseModel):
     url: HttpUrl
     language: Optional[str] = None
+    only_text: Optional[bool] = False
 
 
 async def _acquire_slot():
@@ -138,7 +139,7 @@ def _result_to_dict(result: Any) -> dict[str, Any]:
     }
 
 
-async def _transcribe(path: str, language: Optional[str]) -> dict[str, Any]:
+async def _transcribe(path: str, language: Optional[str], only_text: bool = False) -> dict[str, Any]:
     model = _state.get("model")
     if model is None:
         raise HTTPException(status_code=503, detail="model not loaded")
@@ -152,7 +153,10 @@ async def _transcribe(path: str, language: Optional[str]) -> dict[str, Any]:
         except Exception as e:
             logger.exception("transcribe failed")
             raise HTTPException(status_code=500, detail=f"transcribe failed: {e}") from e
-    return _result_to_dict(result)
+    data = _result_to_dict(result)
+    if only_text:
+        return {"text": data["text"]}
+    return data
 
 
 @app.get("/health")
@@ -171,6 +175,7 @@ async def health():
 async def asr_file(
     audio_file: UploadFile = File(...),
     language: Optional[str] = Form(None),
+    only_text: Optional[bool] = Form(False),
 ):
     await _acquire_slot()
     suffix = _suffix_from_name(audio_file.filename)
@@ -189,7 +194,7 @@ async def asr_file(
         tmp.close()
         if total == 0:
             raise HTTPException(status_code=400, detail="empty audio_file")
-        return await _transcribe(tmp_path, language)
+        return await _transcribe(tmp_path, language, only_text)
     finally:
         try:
             if not tmp.closed:
@@ -239,7 +244,7 @@ async def asr_url(req: AsrUrlReq):
 
         if total == 0:
             raise HTTPException(status_code=400, detail="empty remote file")
-        return await _transcribe(tmp_path, req.language)
+        return await _transcribe(tmp_path, req.language, req.only_text)
     finally:
         if tmp_path:
             try:
