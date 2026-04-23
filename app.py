@@ -23,11 +23,12 @@ from pydantic import BaseModel, HttpUrl
 
 from worker import worker_main
 
-MODEL_ID = os.environ.get("ASR_MODEL_ID", "mlx-community/Qwen3-ASR-1.7B-8bit")
+MODEL_ID = os.environ.get("ASR_MODEL_ID", "mlx-community/whisper-large-v3-turbo")
 ALIGNER_ID = os.environ.get(
     "ASR_ALIGNER_ID", "mlx-community/Qwen3-ForcedAligner-0.6B-8bit"
 )
-ENABLE_ALIGN = os.environ.get("ASR_ENABLE_ALIGN", "1") not in ("0", "false", "False", "")
+# Whisper 原生返回切好的 segments，不需要 aligner；默认关闭
+ENABLE_ALIGN = os.environ.get("ASR_ENABLE_ALIGN", "0") not in ("0", "false", "False", "")
 SEG_GAP_SEC = float(os.environ.get("ASR_SEG_GAP_SEC", "0.8"))
 SEG_MAX_DURATION = float(os.environ.get("ASR_SEG_MAX_DURATION", "30"))
 SEG_MAX_CHARS = int(os.environ.get("ASR_SEG_MAX_CHARS", "120"))
@@ -39,10 +40,13 @@ MAX_CONCURRENCY = int(os.environ.get("ASR_MAX_CONCURRENCY", "1"))
 ASR_TIMEOUT = float(os.environ.get("ASR_TIMEOUT", "180"))
 ALIGN_TIMEOUT = float(os.environ.get("ASR_ALIGN_TIMEOUT", "60"))
 WORKER_READY_TIMEOUT = float(os.environ.get("ASR_WORKER_READY_TIMEOUT", "600"))
-# 限制每次 ASR 最多生成多少 token，防止自回归跑飞。0 = 不限制。
-ASR_MAX_NEW_TOKENS = int(os.environ.get("ASR_MAX_NEW_TOKENS", "2048"))
+# Whisper 的单词级时间戳（输出更精准但更慢）
+ASR_WORD_TIMESTAMPS = os.environ.get("ASR_WORD_TIMESTAMPS", "0") not in ("0", "false", "False", "")
 
-_CJK_LANGS = {"chinese", "cantonese", "japanese", "korean"}
+_CJK_LANGS = {
+    "chinese", "cantonese", "japanese", "korean",
+    "zh", "zh-cn", "zh-tw", "ja", "ko", "yue",
+}
 
 # ForcedAligner 已知支持语言（不在列表里就不调 aligner，直接走标点切分 fallback）
 _ALIGNER_SUPPORTED_LANGS = {
@@ -280,8 +284,9 @@ def _coerce_lang(lang: Any) -> Optional[str]:
 
 
 def _normalize_language(lang: Any) -> Optional[str]:
+    """Whisper 接受小写 ISO 码（en/zh/ja）或全拼小写（english/chinese）。"""
     s = _coerce_lang(lang)
-    return s.capitalize() if s else None
+    return s.lower() if s else None
 
 
 def _is_cjk_language(lang: Any) -> bool:
@@ -468,15 +473,15 @@ async def _transcribe(path: str, language: Optional[str]) -> dict[str, Any]:
     norm_lang = _normalize_language(language)
     if norm_lang:
         args["language"] = norm_lang
-    if ASR_MAX_NEW_TOKENS > 0:
-        args["max_new_tokens"] = ASR_MAX_NEW_TOKENS
+    if ASR_WORD_TIMESTAMPS:
+        args["word_timestamps"] = True
     async with sem:
         logger.info(
-            "asr: start (path=%s, lang=%s, timeout=%.0fs, max_new_tokens=%s)",
+            "asr: start (path=%s, lang=%s, timeout=%.0fs, word_ts=%s)",
             os.path.basename(path),
             norm_lang,
             ASR_TIMEOUT,
-            ASR_MAX_NEW_TOKENS or "unlimited",
+            ASR_WORD_TIMESTAMPS,
         )
         try:
             out = await worker.call("asr", args, timeout=ASR_TIMEOUT)
@@ -565,7 +570,7 @@ async def health():
         "align_max_chars": ALIGN_MAX_CHARS,
         "asr_timeout": ASR_TIMEOUT,
         "align_timeout": ALIGN_TIMEOUT,
-        "asr_max_new_tokens": ASR_MAX_NEW_TOKENS,
+        "word_timestamps": ASR_WORD_TIMESTAMPS,
     }
 
 

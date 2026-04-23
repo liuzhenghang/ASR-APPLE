@@ -6,9 +6,10 @@ VENV_DIR="${VENV_DIR:-.venv}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 ASR_HOST="${ASR_HOST:-0.0.0.0}"
 ASR_PORT="${ASR_PORT:-8000}"
-ASR_MODEL_ID="${ASR_MODEL_ID:-mlx-community/Qwen3-ASR-1.7B-8bit}"
+ASR_MODEL_ID="${ASR_MODEL_ID:-mlx-community/whisper-large-v3-turbo}"
 ASR_ALIGNER_ID="${ASR_ALIGNER_ID:-mlx-community/Qwen3-ForcedAligner-0.6B-8bit}"
-ASR_ENABLE_ALIGN="${ASR_ENABLE_ALIGN:-1}"
+ASR_ENABLE_ALIGN="${ASR_ENABLE_ALIGN:-0}"
+ASR_WORD_TIMESTAMPS="${ASR_WORD_TIMESTAMPS:-0}"
 ASR_SEG_GAP_SEC="${ASR_SEG_GAP_SEC:-0.8}"
 ASR_SEG_MAX_DURATION="${ASR_SEG_MAX_DURATION:-30}"
 ASR_SEG_MAX_CHARS="${ASR_SEG_MAX_CHARS:-120}"
@@ -18,7 +19,6 @@ ASR_MAX_CONCURRENCY="${ASR_MAX_CONCURRENCY:-1}"
 ASR_TIMEOUT="${ASR_TIMEOUT:-180}"
 ASR_ALIGN_TIMEOUT="${ASR_ALIGN_TIMEOUT:-60}"
 ASR_WORKER_READY_TIMEOUT="${ASR_WORKER_READY_TIMEOUT:-600}"
-ASR_MAX_NEW_TOKENS="${ASR_MAX_NEW_TOKENS:-2048}"
 # 可选: 走镜像加速 HF 下载
 # export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 
@@ -82,21 +82,21 @@ fi
 
 # ---------- 导出运行参数 ----------
 export ASR_HOST ASR_PORT ASR_MODEL_ID ASR_ALIGNER_ID ASR_ENABLE_ALIGN \
+  ASR_WORD_TIMESTAMPS \
   ASR_SEG_GAP_SEC ASR_SEG_MAX_DURATION ASR_SEG_MAX_CHARS ASR_ALIGN_MAX_CHARS \
   ASR_MAX_QUEUE ASR_MAX_CONCURRENCY \
-  ASR_TIMEOUT ASR_ALIGN_TIMEOUT ASR_WORKER_READY_TIMEOUT \
-  ASR_MAX_NEW_TOKENS
+  ASR_TIMEOUT ASR_ALIGN_TIMEOUT ASR_WORKER_READY_TIMEOUT
 
 echo "[start.sh] ========================================"
-echo "[start.sh] MODEL        : $ASR_MODEL_ID"
+echo "[start.sh] MODEL        : $ASR_MODEL_ID (whisper)"
 echo "[start.sh] ALIGNER      : $ASR_ALIGNER_ID (enable=$ASR_ENABLE_ALIGN)"
-echo "[start.sh] SEG          : gap=${ASR_SEG_GAP_SEC}s max_dur=${ASR_SEG_MAX_DURATION}s max_chars=${ASR_SEG_MAX_CHARS}"
+echo "[start.sh] WORD_TS      : $ASR_WORD_TIMESTAMPS"
+echo "[start.sh] SEG (fallback): gap=${ASR_SEG_GAP_SEC}s max_dur=${ASR_SEG_MAX_DURATION}s max_chars=${ASR_SEG_MAX_CHARS}"
 echo "[start.sh] MODELS_DIR   : $MODELS_DIR"
 echo "[start.sh] HOST:PORT    : $ASR_HOST:$ASR_PORT"
 echo "[start.sh] MAX_QUEUE    : $ASR_MAX_QUEUE"
 echo "[start.sh] MAX_CONCURR. : $ASR_MAX_CONCURRENCY"
 echo "[start.sh] TIMEOUT      : asr=${ASR_TIMEOUT}s align=${ASR_ALIGN_TIMEOUT}s"
-echo "[start.sh] MAX_NEW_TOK  : $ASR_MAX_NEW_TOKENS (0=unlimited)"
 echo "[start.sh] ========================================"
 
 # ---------- 启动 ----------

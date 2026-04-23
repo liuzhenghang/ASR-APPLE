@@ -1,3 +1,4 @@
+mlx-whisper
 mlx-audio
 fastapi
 uvicorn[standard]
