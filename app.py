@@ -1,7 +1,10 @@
 import asyncio
 import logging
+import multiprocessing as mp
 import os
+import queue as _queue
 import tempfile
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -18,7 +21,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, HttpUrl
 
-from mlx_audio.stt import load
+from worker import worker_main
 
 MODEL_ID = os.environ.get("ASR_MODEL_ID", "mlx-community/Qwen3-ASR-1.7B-8bit")
 ALIGNER_ID = os.environ.get(
@@ -28,10 +31,14 @@ ENABLE_ALIGN = os.environ.get("ASR_ENABLE_ALIGN", "1") not in ("0", "false", "Fa
 SEG_GAP_SEC = float(os.environ.get("ASR_SEG_GAP_SEC", "0.8"))
 SEG_MAX_DURATION = float(os.environ.get("ASR_SEG_MAX_DURATION", "30"))
 SEG_MAX_CHARS = int(os.environ.get("ASR_SEG_MAX_CHARS", "120"))
+ALIGN_MAX_CHARS = int(os.environ.get("ASR_ALIGN_MAX_CHARS", "3000"))
 MAX_DOWNLOAD_BYTES = int(os.environ.get("ASR_MAX_DOWNLOAD_BYTES", str(500 * 1024 * 1024)))
 DOWNLOAD_TIMEOUT = float(os.environ.get("ASR_DOWNLOAD_TIMEOUT", "60"))
 MAX_QUEUE = int(os.environ.get("ASR_MAX_QUEUE", "5"))
 MAX_CONCURRENCY = int(os.environ.get("ASR_MAX_CONCURRENCY", "1"))
+ASR_TIMEOUT = float(os.environ.get("ASR_TIMEOUT", "180"))
+ALIGN_TIMEOUT = float(os.environ.get("ASR_ALIGN_TIMEOUT", "60"))
+WORKER_READY_TIMEOUT = float(os.environ.get("ASR_WORKER_READY_TIMEOUT", "600"))
 
 _CJK_LANGS = {"chinese", "cantonese", "japanese", "korean"}
 
@@ -52,32 +59,149 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 _state: dict[str, Any] = {}
 
 
+class WorkerBusy(Exception):
+    pass
+
+
+class WorkerManager:
+    """常驻子进程 + 串行 RPC。超时时 terminate 子进程并自动重启。"""
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.ctx = mp.get_context("spawn")
+        self.proc: Optional[mp.process.BaseProcess] = None
+        self.req_q = None
+        self.resp_q = None
+        self.aligner_ready = False
+        self.lock = asyncio.Lock()
+        self.restart_count = 0
+
+    def _start_sync(self) -> None:
+        self.req_q = self.ctx.Queue()
+        self.resp_q = self.ctx.Queue()
+        ready = self.ctx.Event()
+        aligner_ready = self.ctx.Event()
+        self.proc = self.ctx.Process(
+            target=worker_main,
+            args=(self.cfg, self.req_q, self.resp_q, ready, aligner_ready),
+            daemon=True,
+        )
+        self.proc.start()
+        logger.info(
+            "worker: spawned pid=%d, waiting model load (<= %.0fs)...",
+            self.proc.pid,
+            WORKER_READY_TIMEOUT,
+        )
+        if not ready.wait(timeout=WORKER_READY_TIMEOUT):
+            self._kill_sync()
+            raise RuntimeError(
+                f"worker did not become ready in {WORKER_READY_TIMEOUT:.0f}s"
+            )
+        self.aligner_ready = aligner_ready.is_set()
+        logger.info(
+            "worker: ready (pid=%d, aligner=%s)",
+            self.proc.pid,
+            self.aligner_ready,
+        )
+
+    def _kill_sync(self) -> None:
+        proc = self.proc
+        old_resp_q = self.resp_q
+        self.proc = None
+        self.req_q = None
+        self.resp_q = None
+        if proc is not None:
+            try:
+                if proc.is_alive():
+                    logger.warning("worker: terminating pid=%d", proc.pid)
+                    proc.terminate()
+                    proc.join(timeout=5)
+                if proc.is_alive():
+                    logger.warning("worker: kill -9 pid=%d", proc.pid)
+                    proc.kill()
+                    proc.join(timeout=5)
+            except Exception:
+                logger.exception("worker: kill error")
+        # 唤醒可能卡在 resp_q.get() 的后台线程，避免线程泄漏
+        if old_resp_q is not None:
+            try:
+                old_resp_q.put_nowait(
+                    {"id": "__killed__", "ok": False, "error": "worker killed"}
+                )
+            except Exception:
+                pass
+
+    async def start(self) -> None:
+        await asyncio.to_thread(self._start_sync)
+
+    async def stop(self) -> None:
+        await asyncio.to_thread(self._kill_sync)
+
+    async def _ensure_alive(self) -> None:
+        if self.proc is None or not self.proc.is_alive():
+            logger.warning("worker: not alive, restarting...")
+            self.restart_count += 1
+            await asyncio.to_thread(self._start_sync)
+
+    async def call(self, op: str, args: dict, timeout: float) -> Any:
+        async with self.lock:
+            await self._ensure_alive()
+            tid = uuid.uuid4().hex
+            req_q = self.req_q
+            resp_q = self.resp_q
+            # 清空可能遗留的响应（正常情况下应该没有，保险起见）
+            try:
+                while True:
+                    resp_q.get_nowait()
+            except _queue.Empty:
+                pass
+            await asyncio.to_thread(req_q.put, {"id": tid, "op": op, "args": args})
+            try:
+                resp = await asyncio.wait_for(
+                    asyncio.to_thread(resp_q.get), timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "worker: timeout on op=%s after %.0fs, killing worker",
+                    op,
+                    timeout,
+                )
+                await asyncio.to_thread(self._kill_sync)
+                raise
+            if resp.get("id") == "__killed__" or not resp.get("ok"):
+                err = resp.get("error") or "worker error"
+                raise RuntimeError(err)
+            return resp["result"]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("HF_HOME=%s", os.environ.get("HF_HOME"))
-    logger.info("loading mlx asr model: %s", MODEL_ID)
-    _state["model"] = load(MODEL_ID)
-    _state["aligner"] = None
-    if ENABLE_ALIGN:
-        try:
-            logger.info("loading mlx forced-aligner: %s", ALIGNER_ID)
-            _state["aligner"] = load(ALIGNER_ID)
-            logger.info("aligner loaded")
-        except Exception as e:
-            logger.exception("load aligner failed, will skip post-alignment: %s", e)
-            _state["aligner"] = None
+    cfg = {
+        "model_id": MODEL_ID,
+        "aligner_id": ALIGNER_ID,
+        "enable_align": ENABLE_ALIGN,
+        "hf_home": os.environ.get("HF_HOME"),
+    }
+    wm = WorkerManager(cfg)
+    await wm.start()
+    _state["worker"] = wm
     _state["semaphore"] = asyncio.Semaphore(MAX_CONCURRENCY)
     _state["counter_lock"] = asyncio.Lock()
     _state["in_flight"] = 0
     logger.info(
-        "model loaded (max_queue=%d, max_concurrency=%d, align=%s)",
+        "service ready (max_queue=%d, max_concurrency=%d, align=%s)",
         MAX_QUEUE,
         MAX_CONCURRENCY,
-        bool(_state["aligner"]),
+        wm.aligner_ready,
     )
     try:
         yield
     finally:
+        try:
+            await wm.stop()
+        except Exception:
+            logger.exception("worker stop error")
         _state.clear()
 
 
@@ -137,41 +261,6 @@ def _suffix_from_url(url: str, content_type: Optional[str]) -> str:
         if ct in mapping:
             return mapping[ct]
     return ".wav"
-
-
-def _result_to_dict(result: Any) -> dict[str, Any]:
-    text = getattr(result, "text", None)
-    if isinstance(text, (list, tuple)):
-        text = text[0] if text else None
-    segments = getattr(result, "segments", None) or []
-    language = _coerce_lang(getattr(result, "language", None))
-    total_time = getattr(result, "total_time", None)
-
-    norm_segments = []
-    for seg in segments:
-        if isinstance(seg, dict):
-            norm_segments.append(
-                {
-                    "text": seg.get("text"),
-                    "start": seg.get("start"),
-                    "end": seg.get("end"),
-                }
-            )
-        else:
-            norm_segments.append(
-                {
-                    "text": getattr(seg, "text", None),
-                    "start": getattr(seg, "start", None),
-                    "end": getattr(seg, "end", None),
-                }
-            )
-
-    return {
-        "text": text,
-        "segments": norm_segments,
-        "language": language,
-        "total_time": total_time,
-    }
 
 
 def _coerce_lang(lang: Any) -> Optional[str]:
@@ -274,52 +363,11 @@ def _split_text_by_punct(text: str, language: Optional[str]) -> list[str]:
     return [s for s in (x.strip() for x in result) if s]
 
 
-def _align_to_segments(
-    audio_path: str,
-    text: str,
-    language: Optional[str],
+def _items_to_segments(
+    items: list[dict[str, Any]], language: Optional[str]
 ) -> list[dict[str, Any]]:
-    """用 ForcedAligner 拿到 word/char 级时间戳，按停顿切段。失败返回 []。"""
-    aligner = _state.get("aligner")
-    if aligner is None:
-        logger.info("align: skip (aligner not loaded)")
+    if not items:
         return []
-    if not text or not text.strip():
-        logger.info("align: skip (empty text)")
-        return []
-    if not _aligner_supports(language):
-        logger.info(
-            "align: skip (language %r not in aligner-supported %s)",
-            language,
-            sorted(_ALIGNER_SUPPORTED_LANGS),
-        )
-        return []
-    try:
-        norm_lang = _normalize_language(language)
-        kwargs: dict[str, Any] = {"audio": audio_path, "text": text}
-        if norm_lang:
-            kwargs["language"] = norm_lang
-        logger.info(
-            "align: run aligner (lang=%s, text_len=%d)", norm_lang, len(text)
-        )
-        items = aligner.generate(**kwargs)
-    except Exception:
-        logger.exception("align: forced-align failed")
-        return []
-
-    norm: list[dict[str, Any]] = []
-    for it in items or []:
-        t = getattr(it, "text", None) if not isinstance(it, dict) else it.get("text")
-        s = getattr(it, "start_time", None) if not isinstance(it, dict) else it.get("start_time")
-        e = getattr(it, "end_time", None) if not isinstance(it, dict) else it.get("end_time")
-        if t is None or s is None or e is None:
-            continue
-        norm.append({"text": str(t), "start": float(s), "end": float(e)})
-
-    logger.info("align: got %d aligned items", len(norm))
-    if not norm:
-        return []
-
     cjk = _is_cjk_language(language)
     joiner = "" if cjk else " "
 
@@ -340,7 +388,7 @@ def _align_to_segments(
             }
         )
 
-    for item in norm:
+    for item in items:
         w, s, e = item["text"], item["start"], item["end"]
         gap = (s - prev_end) if prev_end is not None else 0.0
         cur_chars = len(joiner.join(cur_words))
@@ -364,26 +412,85 @@ def _align_to_segments(
     return [seg for seg in segments if seg["text"]]
 
 
+async def _run_align(
+    worker: "WorkerManager",
+    audio_path: str,
+    text: str,
+    language: Optional[str],
+) -> list[dict[str, Any]]:
+    if not worker.aligner_ready:
+        logger.info("align: skip (aligner not loaded)")
+        return []
+    if not text or not text.strip():
+        logger.info("align: skip (empty text)")
+        return []
+    if len(text) > ALIGN_MAX_CHARS:
+        logger.info(
+            "align: skip (text_len=%d > ASR_ALIGN_MAX_CHARS=%d)",
+            len(text),
+            ALIGN_MAX_CHARS,
+        )
+        return []
+    if not _aligner_supports(language):
+        logger.info(
+            "align: skip (language %r not in aligner-supported %s)",
+            language,
+            sorted(_ALIGNER_SUPPORTED_LANGS),
+        )
+        return []
+    norm_lang = _normalize_language(language)
+    args: dict[str, Any] = {"audio": audio_path, "text": text}
+    if norm_lang:
+        args["language"] = norm_lang
+    logger.info("align: run aligner (lang=%s, text_len=%d)", norm_lang, len(text))
+    try:
+        items = await worker.call("align", args, timeout=ALIGN_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.error(
+            "align: timeout after %.0fs, worker killed", ALIGN_TIMEOUT
+        )
+        return []
+    except Exception as e:
+        logger.error("align: failed (%s)", e)
+        return []
+    logger.info("align: got %d aligned items", len(items or []))
+    return _items_to_segments(items or [], language)
+
+
 async def _transcribe(path: str, language: Optional[str]) -> dict[str, Any]:
-    model = _state.get("model")
-    if model is None:
-        raise HTTPException(status_code=503, detail="model not loaded")
+    worker: Optional[WorkerManager] = _state.get("worker")
+    if worker is None:
+        raise HTTPException(status_code=503, detail="worker not ready")
     sem: asyncio.Semaphore = _state["semaphore"]
-    kwargs: dict[str, Any] = {}
+    args: dict[str, Any] = {"path": path}
     norm_lang = _normalize_language(language)
     if norm_lang:
-        kwargs["language"] = norm_lang
+        args["language"] = norm_lang
     async with sem:
+        logger.info(
+            "asr: start (path=%s, lang=%s, timeout=%.0fs)",
+            os.path.basename(path),
+            norm_lang,
+            ASR_TIMEOUT,
+        )
         try:
-            logger.info(
-                "asr: start (path=%s, lang=%s)", os.path.basename(path), norm_lang
+            out = await worker.call("asr", args, timeout=ASR_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.error(
+                "asr: timeout after %.0fs (path=%s, lang=%s), worker restarted",
+                ASR_TIMEOUT,
+                os.path.basename(path),
+                norm_lang,
             )
-            result = await asyncio.to_thread(model.generate, path, **kwargs)
+            raise HTTPException(
+                status_code=504,
+                detail=f"asr timeout after {ASR_TIMEOUT:.0f}s, worker killed and restarted",
+            )
         except Exception as e:
-            logger.exception("transcribe failed")
+            logger.exception("asr: worker call failed")
             raise HTTPException(status_code=500, detail=f"transcribe failed: {e}") from e
 
-        out = _result_to_dict(result)
+        out["language"] = _coerce_lang(out.get("language"))
         detected_lang = out.get("language") or norm_lang
         raw_text = (out.get("text") or "").strip()
         raw_segments = out.get("segments") or []
@@ -397,14 +504,8 @@ async def _transcribe(path: str, language: Optional[str]) -> dict[str, Any]:
 
         segs: list[dict[str, Any]] = []
 
-        if _state.get("aligner") is not None and raw_text:
-            try:
-                segs = await asyncio.to_thread(
-                    _align_to_segments, path, raw_text, detected_lang
-                )
-            except Exception:
-                logger.exception("align task failed")
-                segs = []
+        if worker.aligner_ready and raw_text:
+            segs = await _run_align(worker, path, raw_text, detected_lang)
 
         if not segs and len(raw_segments) > 1:
             logger.info("seg: use native asr segments (%d)", len(raw_segments))
@@ -441,17 +542,24 @@ async def _transcribe(path: str, language: Optional[str]) -> dict[str, Any]:
 
 @app.get("/health")
 async def health():
+    worker: Optional[WorkerManager] = _state.get("worker")
+    worker_alive = bool(worker and worker.proc and worker.proc.is_alive())
     return {
-        "status": "ok",
+        "status": "ok" if worker_alive else "worker_down",
         "model": MODEL_ID,
-        "loaded": _state.get("model") is not None,
-        "aligner": ALIGNER_ID if _state.get("aligner") is not None else None,
+        "aligner": ALIGNER_ID if (worker and worker.aligner_ready) else None,
+        "worker_alive": worker_alive,
+        "worker_pid": worker.proc.pid if worker_alive else None,
+        "worker_restarts": worker.restart_count if worker else 0,
         "in_flight": _state.get("in_flight", 0),
         "max_queue": MAX_QUEUE,
         "max_concurrency": MAX_CONCURRENCY,
         "seg_gap_sec": SEG_GAP_SEC,
         "seg_max_duration": SEG_MAX_DURATION,
         "seg_max_chars": SEG_MAX_CHARS,
+        "align_max_chars": ALIGN_MAX_CHARS,
+        "asr_timeout": ASR_TIMEOUT,
+        "align_timeout": ALIGN_TIMEOUT,
     }
 
 
