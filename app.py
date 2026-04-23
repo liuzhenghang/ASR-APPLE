@@ -39,6 +39,8 @@ MAX_CONCURRENCY = int(os.environ.get("ASR_MAX_CONCURRENCY", "1"))
 ASR_TIMEOUT = float(os.environ.get("ASR_TIMEOUT", "180"))
 ALIGN_TIMEOUT = float(os.environ.get("ASR_ALIGN_TIMEOUT", "60"))
 WORKER_READY_TIMEOUT = float(os.environ.get("ASR_WORKER_READY_TIMEOUT", "600"))
+# 限制每次 ASR 最多生成多少 token，防止自回归跑飞。0 = 不限制。
+ASR_MAX_NEW_TOKENS = int(os.environ.get("ASR_MAX_NEW_TOKENS", "2048"))
 
 _CJK_LANGS = {"chinese", "cantonese", "japanese", "korean"}
 
@@ -466,12 +468,15 @@ async def _transcribe(path: str, language: Optional[str]) -> dict[str, Any]:
     norm_lang = _normalize_language(language)
     if norm_lang:
         args["language"] = norm_lang
+    if ASR_MAX_NEW_TOKENS > 0:
+        args["max_new_tokens"] = ASR_MAX_NEW_TOKENS
     async with sem:
         logger.info(
-            "asr: start (path=%s, lang=%s, timeout=%.0fs)",
+            "asr: start (path=%s, lang=%s, timeout=%.0fs, max_new_tokens=%s)",
             os.path.basename(path),
             norm_lang,
             ASR_TIMEOUT,
+            ASR_MAX_NEW_TOKENS or "unlimited",
         )
         try:
             out = await worker.call("asr", args, timeout=ASR_TIMEOUT)
@@ -560,6 +565,7 @@ async def health():
         "align_max_chars": ALIGN_MAX_CHARS,
         "asr_timeout": ASR_TIMEOUT,
         "align_timeout": ALIGN_TIMEOUT,
+        "asr_max_new_tokens": ASR_MAX_NEW_TOKENS,
     }
 
 

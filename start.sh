@@ -18,6 +18,7 @@ ASR_MAX_CONCURRENCY="${ASR_MAX_CONCURRENCY:-1}"
 ASR_TIMEOUT="${ASR_TIMEOUT:-180}"
 ASR_ALIGN_TIMEOUT="${ASR_ALIGN_TIMEOUT:-60}"
 ASR_WORKER_READY_TIMEOUT="${ASR_WORKER_READY_TIMEOUT:-600}"
+ASR_MAX_NEW_TOKENS="${ASR_MAX_NEW_TOKENS:-2048}"
 # 可选: 走镜像加速 HF 下载
 # export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 
@@ -83,7 +84,8 @@ fi
 export ASR_HOST ASR_PORT ASR_MODEL_ID ASR_ALIGNER_ID ASR_ENABLE_ALIGN \
   ASR_SEG_GAP_SEC ASR_SEG_MAX_DURATION ASR_SEG_MAX_CHARS ASR_ALIGN_MAX_CHARS \
   ASR_MAX_QUEUE ASR_MAX_CONCURRENCY \
-  ASR_TIMEOUT ASR_ALIGN_TIMEOUT ASR_WORKER_READY_TIMEOUT
+  ASR_TIMEOUT ASR_ALIGN_TIMEOUT ASR_WORKER_READY_TIMEOUT \
+  ASR_MAX_NEW_TOKENS
 
 echo "[start.sh] ========================================"
 echo "[start.sh] MODEL        : $ASR_MODEL_ID"
@@ -94,6 +96,7 @@ echo "[start.sh] HOST:PORT    : $ASR_HOST:$ASR_PORT"
 echo "[start.sh] MAX_QUEUE    : $ASR_MAX_QUEUE"
 echo "[start.sh] MAX_CONCURR. : $ASR_MAX_CONCURRENCY"
 echo "[start.sh] TIMEOUT      : asr=${ASR_TIMEOUT}s align=${ASR_ALIGN_TIMEOUT}s"
+echo "[start.sh] MAX_NEW_TOK  : $ASR_MAX_NEW_TOKENS (0=unlimited)"
 echo "[start.sh] ========================================"
 
 # ---------- 启动 ----------

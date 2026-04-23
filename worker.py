@@ -63,6 +63,27 @@ def _align_result_to_list(r: Any) -> list:
     return out
 
 
+def _safe_call(fn, *args, **kwargs):
+    """带 kwargs 兼容降级：如果某个 kwarg 不支持，丢弃它再试一次。"""
+    try:
+        return fn(*args, **kwargs)
+    except TypeError as e:
+        msg = str(e)
+        dropped = None
+        for k in list(kwargs.keys()):
+            if k in msg:
+                dropped = k
+                kwargs.pop(k)
+                break
+        if dropped is None:
+            raise
+        print(
+            f"[worker pid={os.getpid()}] dropped unsupported kwarg '{dropped}': {e}",
+            flush=True,
+        )
+        return _safe_call(fn, *args, **kwargs)
+
+
 def worker_main(cfg: dict, req_q, resp_q, ready_ev, aligner_ready_ev) -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
@@ -109,12 +130,12 @@ def worker_main(cfg: dict, req_q, resp_q, ready_ev, aligner_ready_ev) -> None:
         try:
             if op == "asr":
                 path = args.pop("path")
-                r = asr.generate(path, **args)
+                r = _safe_call(asr.generate, path, **args)
                 out = _stt_output_to_dict(r)
             elif op == "align":
                 if aligner is None:
                     raise RuntimeError("aligner not available in worker")
-                r = aligner.generate(**args)
+                r = _safe_call(aligner.generate, **args)
                 out = _align_result_to_list(r)
             else:
                 raise ValueError(f"unknown op: {op}")
