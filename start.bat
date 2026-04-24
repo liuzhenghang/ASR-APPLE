@@ -15,7 +15,10 @@ if not defined VENV_DIR        set "VENV_DIR=%SCRIPT_DIR%\.venv"
 if not defined PYTHON_BIN      set "PYTHON_BIN=python"
 if not defined ASR_HOST        set "ASR_HOST=0.0.0.0"
 if not defined ASR_PORT        set "ASR_PORT=8000"
-if not defined ASR_MODEL_ID    set "ASR_MODEL_ID=bweng/whisper-large-v3-turbo-int8-ov"
+rem bweng/whisper-large-v3-turbo-int8-ov 是老版 optimum-intel 导的，新 openvino-genai 跑会报
+rem "Port for tensor name beam_idx was not found"。FluidInference 这版是新导出的 stateful IR，
+rem 名字虽带 -npu 但 CPU/GPU 也能跑。
+if not defined ASR_MODEL_ID    set "ASR_MODEL_ID=FluidInference/whisper-large-v3-turbo-int8-ov-npu"
 if not defined ASR_ALIGNER_ID  set "ASR_ALIGNER_ID="
 if not defined ASR_ENABLE_ALIGN set "ASR_ENABLE_ALIGN=0"
 if not defined ASR_WORD_TIMESTAMPS set "ASR_WORD_TIMESTAMPS=0"

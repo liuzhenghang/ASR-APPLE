@@ -1,0 +1,7 @@
+faster-whisper>=1.0.0
+av
+huggingface_hub
+fastapi
+uvicorn[standard]
+python-multipart
+httpx

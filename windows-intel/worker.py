@@ -173,6 +173,26 @@ def worker_main(cfg: dict, req_q, resp_q, ready_ev, aligner_ready_ev) -> None:
 
     local_dir = _ensure_model_local(model_id, hf_home)
 
+    # Windows: 显式把 openvino/libs 加进 DLL 搜索路径。
+    # 正常情况下 openvino 包自己会做，但如果发生 ImportError: DLL load failed
+    # 通常原因是缺 VC++ Redistributable，或者 pip 清华源把 openvino 的 dll 下崩了。
+    if sys.platform == "win32":
+        try:
+            import openvino as _ov_probe
+
+            _libs_dir = os.path.join(os.path.dirname(_ov_probe.__file__), "libs")
+            if os.path.isdir(_libs_dir):
+                os.add_dll_directory(_libs_dir)
+                os.environ["PATH"] = _libs_dir + os.pathsep + os.environ.get("PATH", "")
+        except ImportError as e:
+            print(
+                f"[worker pid={os.getpid()}] openvino import failed: {e}\n"
+                f"  -> 大概率缺 Visual C++ Redistributable (x64): https://aka.ms/vs/17/release/vc_redist.x64.exe\n"
+                f"  -> 或者 pip 清华源下载不完整，重装: pip install -U --no-cache-dir openvino openvino-tokenizers openvino-genai -i https://pypi.org/simple",
+                flush=True,
+            )
+            raise
+
     print(f"[worker pid={os.getpid()}] importing openvino_genai...", flush=True)
     import openvino_genai as ov_genai
 
@@ -263,11 +283,19 @@ def worker_main(cfg: dict, req_q, resp_q, ready_ev, aligner_ready_ev) -> None:
                 raise ValueError(f"unknown op: {op}")
             resp_q.put({"id": tid, "ok": True, "result": out})
         except Exception as e:
+            err_msg = f"{type(e).__name__}: {e}"
+            # 老版 optimum-intel 导的模型没 beam_idx 端口，命中就在错误里明说
+            if "beam_idx" in str(e):
+                err_msg += (
+                    "\n>> 模型 IR 和 openvino-genai 版本不匹配 (老模型缺 stateful 端口 beam_idx)。\n"
+                    ">> 换成 FluidInference/whisper-large-v3-turbo-int8-ov-npu 或用 "
+                    "optimum-cli export openvino --model openai/whisper-large-v3-turbo --weight-format int8 ./out 重新导出。"
+                )
             resp_q.put(
                 {
                     "id": tid,
                     "ok": False,
-                    "error": f"{type(e).__name__}: {e}",
+                    "error": err_msg,
                     "tb": traceback.format_exc(),
                 }
             )

@@ -1,13 +1,45 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ---------- 可调参数 ----------
+# ---------- 切到脚本所在目录 ----------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+# ---------- 自动检测平台 ----------
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+case "$OS-$ARCH" in
+  Darwin-arm64)
+    PLATFORM="macos-arm"
+    DEFAULT_MODEL="mlx-community/whisper-large-v3-turbo"
+    DEFAULT_ALIGNER="mlx-community/Qwen3-ForcedAligner-0.6B-8bit"
+    ;;
+  Darwin-x86_64)
+    PLATFORM="macos-intel"
+    DEFAULT_MODEL="deepdml/faster-whisper-large-v3-turbo-ct2"
+    DEFAULT_ALIGNER=""
+    ;;
+  *)
+    echo "[start.sh] 不支持的平台: $OS-$ARCH" >&2
+    echo "[start.sh] 当前只支持 macos-arm (Darwin-arm64) / macos-intel (Darwin-x86_64)，Windows 请用 start.bat" >&2
+    exit 1
+    ;;
+esac
+
+SUBDIR="$SCRIPT_DIR/$PLATFORM"
+REQ_FILE="$SUBDIR/requirements.txt"
+if [ ! -f "$REQ_FILE" ]; then
+  echo "[start.sh] 找不到 $REQ_FILE" >&2
+  exit 1
+fi
+
+# ---------- 可调参数（平台相关默认值由上面给，其它保持通用） ----------
 VENV_DIR="${VENV_DIR:-.venv}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 ASR_HOST="${ASR_HOST:-0.0.0.0}"
 ASR_PORT="${ASR_PORT:-8000}"
-ASR_MODEL_ID="${ASR_MODEL_ID:-mlx-community/whisper-large-v3-turbo}"
-ASR_ALIGNER_ID="${ASR_ALIGNER_ID:-mlx-community/Qwen3-ForcedAligner-0.6B-8bit}"
+ASR_MODEL_ID="${ASR_MODEL_ID:-$DEFAULT_MODEL}"
+ASR_ALIGNER_ID="${ASR_ALIGNER_ID:-$DEFAULT_ALIGNER}"
 ASR_ENABLE_ALIGN="${ASR_ENABLE_ALIGN:-0}"
 ASR_WORD_TIMESTAMPS="${ASR_WORD_TIMESTAMPS:-0}"
 ASR_SEG_GAP_SEC="${ASR_SEG_GAP_SEC:-0.8}"
@@ -21,14 +53,6 @@ ASR_ALIGN_TIMEOUT="${ASR_ALIGN_TIMEOUT:-60}"
 ASR_WORKER_READY_TIMEOUT="${ASR_WORKER_READY_TIMEOUT:-600}"
 # 可选: 走镜像加速 HF 下载
 # export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
-
-# ---------- 切到脚本所在目录 ----------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
-
-# ---------- 平台子目录：macOS/Apple Silicon 走 macos-arm ----------
-SUBDIR="$SCRIPT_DIR/macos-arm"
-REQ_FILE="$SUBDIR/requirements.txt"
 
 # ---------- 模型缓存目录：项目内 models/ ----------
 MODELS_DIR="$SCRIPT_DIR/models"
@@ -61,8 +85,8 @@ done
 
 echo "[start.sh] python=$(python --version 2>&1) at $(which python)"
 
-# ---------- 安装依赖 ----------
-STAMP_FILE="$VENV_DIR/.requirements.macos-arm.stamp"
+# ---------- 安装依赖（stamp 按平台分开，避免两个 macOS 架构互相覆盖判定） ----------
+STAMP_FILE="$VENV_DIR/.requirements.$PLATFORM.stamp"
 
 need_install=0
 if [ "$FORCE_INSTALL" = "1" ]; then
@@ -90,13 +114,13 @@ export ASR_HOST ASR_PORT ASR_MODEL_ID ASR_ALIGNER_ID ASR_ENABLE_ALIGN \
   ASR_MAX_QUEUE ASR_MAX_CONCURRENCY \
   ASR_TIMEOUT ASR_ALIGN_TIMEOUT ASR_WORKER_READY_TIMEOUT
 
-# ---------- 把子目录塞进 PYTHONPATH，让 app.py 能 import worker ----------
+# ---------- 把平台子目录塞进 PYTHONPATH，让 app.py 能 import worker ----------
 export PYTHONPATH="$SUBDIR${PYTHONPATH:+:$PYTHONPATH}"
 
 echo "[start.sh] ========================================"
-echo "[start.sh] PLATFORM     : macos-arm (mlx-whisper)"
-echo "[start.sh] MODEL        : $ASR_MODEL_ID (whisper)"
-echo "[start.sh] ALIGNER      : $ASR_ALIGNER_ID (enable=$ASR_ENABLE_ALIGN)"
+echo "[start.sh] PLATFORM     : $PLATFORM ($OS-$ARCH)"
+echo "[start.sh] MODEL        : $ASR_MODEL_ID"
+echo "[start.sh] ALIGNER      : ${ASR_ALIGNER_ID:-<none>} (enable=$ASR_ENABLE_ALIGN)"
 echo "[start.sh] WORD_TS      : $ASR_WORD_TIMESTAMPS"
 echo "[start.sh] SEG (fallback): gap=${ASR_SEG_GAP_SEC}s max_dur=${ASR_SEG_MAX_DURATION}s max_chars=${ASR_SEG_MAX_CHARS}"
 echo "[start.sh] MODELS_DIR   : $MODELS_DIR"
