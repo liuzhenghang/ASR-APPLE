@@ -1,0 +1,11 @@
+openvino>=2025.2
+openvino-tokenizers>=2025.2
+openvino-genai>=2025.2
+huggingface_hub
+librosa
+soundfile
+numpy
+fastapi
+uvicorn[standard]
+python-multipart
+httpx

@@ -26,6 +26,10 @@ ASR_WORKER_READY_TIMEOUT="${ASR_WORKER_READY_TIMEOUT:-600}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# ---------- 平台子目录：macOS/Apple Silicon 走 macos-arm ----------
+SUBDIR="$SCRIPT_DIR/macos-arm"
+REQ_FILE="$SUBDIR/requirements.txt"
+
 # ---------- 模型缓存目录：项目内 models/ ----------
 MODELS_DIR="$SCRIPT_DIR/models"
 mkdir -p "$MODELS_DIR"
@@ -58,8 +62,7 @@ done
 echo "[start.sh] python=$(python --version 2>&1) at $(which python)"
 
 # ---------- 安装依赖 ----------
-REQ_FILE="requirements.txt"
-STAMP_FILE="$VENV_DIR/.requirements.stamp"
+STAMP_FILE="$VENV_DIR/.requirements.macos-arm.stamp"
 
 need_install=0
 if [ "$FORCE_INSTALL" = "1" ]; then
@@ -72,7 +75,7 @@ elif [ "$REQ_FILE" -nt "$STAMP_FILE" ]; then
 fi
 
 if [ "$need_install" = "1" ]; then
-  echo "[start.sh] 安装/更新依赖..."
+  echo "[start.sh] 安装/更新依赖 ($REQ_FILE)..."
   python -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple
   python -m pip install -r "$REQ_FILE" -i https://pypi.tuna.tsinghua.edu.cn/simple
   touch "$STAMP_FILE"
@@ -87,12 +90,17 @@ export ASR_HOST ASR_PORT ASR_MODEL_ID ASR_ALIGNER_ID ASR_ENABLE_ALIGN \
   ASR_MAX_QUEUE ASR_MAX_CONCURRENCY \
   ASR_TIMEOUT ASR_ALIGN_TIMEOUT ASR_WORKER_READY_TIMEOUT
 
+# ---------- 把子目录塞进 PYTHONPATH，让 app.py 能 import worker ----------
+export PYTHONPATH="$SUBDIR${PYTHONPATH:+:$PYTHONPATH}"
+
 echo "[start.sh] ========================================"
+echo "[start.sh] PLATFORM     : macos-arm (mlx-whisper)"
 echo "[start.sh] MODEL        : $ASR_MODEL_ID (whisper)"
 echo "[start.sh] ALIGNER      : $ASR_ALIGNER_ID (enable=$ASR_ENABLE_ALIGN)"
 echo "[start.sh] WORD_TS      : $ASR_WORD_TIMESTAMPS"
 echo "[start.sh] SEG (fallback): gap=${ASR_SEG_GAP_SEC}s max_dur=${ASR_SEG_MAX_DURATION}s max_chars=${ASR_SEG_MAX_CHARS}"
 echo "[start.sh] MODELS_DIR   : $MODELS_DIR"
+echo "[start.sh] PYTHONPATH   : $PYTHONPATH"
 echo "[start.sh] HOST:PORT    : $ASR_HOST:$ASR_PORT"
 echo "[start.sh] MAX_QUEUE    : $ASR_MAX_QUEUE"
 echo "[start.sh] MAX_CONCURR. : $ASR_MAX_CONCURRENCY"
